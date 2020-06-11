@@ -5,3 +5,5 @@ map-openlayers/dist
 map-openlayers/node_modules
 map-openlayers/.cache
 map-openlayers/package-lock.json
+.DS_Store
+.python
