@@ -1,40 +1,39 @@
-import http.server
-import socketserver
-import re
+#import http.server
+#import socketserver
+#import re
 import psycopg2
 import json
 
 # Database to connect to
 DATABASE = {
-    'user':     'pramsey',
+    'user':     'postgres',
     'password': 'password',
     'host':     'localhost',
     'port':     '5432',
-    'database': 'nyc'
+    'database': 'postgres'
     }
 
 # Table to query for MVT data, and columns to
 # include in the tiles.
 TABLE = {
-    'table':       'nyc_streets',
-    'srid':        '26918',
+    'table':       'buildings',
+    'srid':        '4326',
     'geomColumn':  'geom',
-    'attrColumns': 'gid, name, type'
+    'attrColumns': 'id'
     }  
 
-# HTTP server information
-HOST = 'localhost'
-PORT = 8080
 
 
-########################################################################
+class TileRequestHandler:
 
-class TileRequestHandler(http.server.BaseHTTPRequestHandler):
+    def __init__(DATABASE_PARAMS):
+        self.DATABASE_PARAMS = DATABASE_PARAMS
 
     DATABASE_CONNECTION = None
 
     # Search REQUEST_PATH for /{z}/{x}/{y}.{format} patterns
     def pathToTile(self, path):
+        #TODO - parse from API gateway
         m = re.search(r'^\/(\d+)\/(\d+)\/(\d+)\.(\w+)', path)
         if (m):
             return {'zoom':   int(m.group(1)), 
@@ -106,7 +105,7 @@ class TileRequestHandler(http.server.BaseHTTPRequestHandler):
                        {env}::box2d AS b2d
             ),
             mvtgeom AS (
-                SELECT ST_AsMVTGeom(ST_Transform(t.{geomColumn}, 3857), bounds.b2d) AS geom, 
+                SELECT ST_AsMVTGeom(ST_Transform(ST_Force2D(t.{geomColumn}), 3857), bounds.b2d) AS geom, 
                        {attrColumns}
                 FROM {table} t, bounds
                 WHERE ST_Intersects(t.{geomColumn}, ST_Transform(bounds.geom, {srid}))
@@ -118,6 +117,7 @@ class TileRequestHandler(http.server.BaseHTTPRequestHandler):
 
     # Run tile query SQL and return error on failure conditions
     def sqlToPbf(self, sql):
+        # TODO -> Use AWS data connection
         # Make and hold connection to database
         if not self.DATABASE_CONNECTION:
             try:
@@ -137,32 +137,35 @@ class TileRequestHandler(http.server.BaseHTTPRequestHandler):
         return None
 
 
-    # Handle HTTP GET requests
-    def do_GET(self):
+# Handle HTTP GET requests
+# This becomes Lambda handler ->
 
-        tile = self.pathToTile(self.path)
-        if not (tile and self.tileIsValid(tile)):
-            self.send_error(400, "invalid tile path: %s" % (self.path))
-            return
+mvt = TileRequestHandler()
 
-        env = self.tileToEnvelope(tile)
-        sql = self.envelopeToSQL(env)
-        pbf = self.sqlToPbf(sql)
+def handler(event, context, callback):
 
-        self.log_message("path: %s\ntile: %s\n env: %s" % (self.path, tile, env))
-        self.log_message("sql: %s" % (sql))
-        
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-type", "application/vnd.mapbox-vector-tile")
-        self.end_headers()
-        self.wfile.write(pbf)
+    tile = self.pathToTile(self.path)
+    if not (tile and self.tileIsValid(tile)):
+        self.send_error(400, "invalid tile path: %s" % (self.path))
+        return
 
+    env = mvt.tileToEnvelope(tile)
+    sql = mvt.envelopeToSQL(env)
+    pbf = mvt.sqlToPbf(sql)
 
+    print("path: %s\ntile: %s\n env: %s" % (self.path, tile, env))
+    print("sql: %s" % (sql))
+    
+    ''' -> THIS BECOMES THE CALLBACK
+    self.send_response(200)
+    self.send_header("Access-Control-Allow-Origin", "*")
+    self.send_header("Content-type", "application/vnd.mapbox-vector-tile")
+    self.end_headers()
+    self.wfile.write(pbf)
+    '''
 
-########################################################################
-
-
+"""
+# Not neded in Lambda
 with http.server.HTTPServer((HOST, PORT), TileRequestHandler) as server:
     try:
         print("serving at port", PORT)
@@ -172,5 +175,5 @@ with http.server.HTTPServer((HOST, PORT), TileRequestHandler) as server:
             self.DATABASE_CONNECTION.close()
         print('^C received, shutting down server')
         server.socket.close()
-
+"""
 
