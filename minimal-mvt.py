@@ -1,48 +1,29 @@
-#import http.server
-#import socketserver
-#import re
-import psycopg2
 import json
+import boto3
+import base64
+import os
 
-# Database to connect to
-DATABASE = {
-    'user':     'postgres',
-    'password': 'password',
-    'host':     'localhost',
-    'port':     '5432',
-    'database': 'postgres'
-    }
-
-# Table to query for MVT data, and columns to
-# include in the tiles.
-TABLE = {
-    'table':       'buildings',
-    'srid':        '4326',
-    'geomColumn':  'geom',
-    'attrColumns': 'id'
-    }  
-
-
-
+# Fetch tiles from an Aurora Postgres DB using the AWS Data API
 class TileRequestHandler:
 
-    def __init__(DATABASE_PARAMS):
-        self.DATABASE_PARAMS = DATABASE_PARAMS
+    def __init__(self, database, table):
+        self.database = database
+        self.table = table
+        self.rdsData = boto3.client('rds-data')
 
-    DATABASE_CONNECTION = None
 
     # Search REQUEST_PATH for /{z}/{x}/{y}.{format} patterns
-    def pathToTile(self, path):
-        #TODO - parse from API gateway
-        m = re.search(r'^\/(\d+)\/(\d+)\/(\d+)\.(\w+)', path)
-        if (m):
-            return {'zoom':   int(m.group(1)), 
-                    'x':      int(m.group(2)), 
-                    'y':      int(m.group(3)), 
-                    'format': m.group(4)}
+    def pathToTile(self, params):
+
+        if (params):
+            return { 
+                'zoom': int(params['z']),
+                'x': int(params['x']),
+                'y': int(params['y']),
+                'format': 'mvt' # hard code format for demo.
+            }
         else:
             return None
-
 
     # Do we have all keys we need? 
     # Do the tile x/y coordinates make sense at this zoom level?
@@ -114,66 +95,62 @@ class TileRequestHandler:
         """
         return sql_tmpl.format(**tbl)
 
-
     # Run tile query SQL and return error on failure conditions
     def sqlToPbf(self, sql):
-        # TODO -> Use AWS data connection
-        # Make and hold connection to database
-        if not self.DATABASE_CONNECTION:
-            try:
-                self.DATABASE_CONNECTION = psycopg2.connect(**DATABASE)
-            except (Exception, psycopg2.Error) as error:
-                self.send_error(500, "cannot connect: %s" % (str(DATABASE)))
-                return None
+        pbf = self.rdsData.execute_statement(
+            resourceArn = self.database['cluster_arn'], 
+            secretArn = self.database['secret_arn'], 
+            database = self.database['database'], 
+            sql = sql)
 
-        # Query for MVT
-        with self.DATABASE_CONNECTION.cursor() as cur:
-            cur.execute(sql)
-            if not cur:
-                self.send_error(404, "sql query failed: %s" % (sql))
-                return None
-            return cur.fetchone()[0]
-        
-        return None
+        # TODO - error handling (return None)
+        return pbf['records'][0][0]['blobValue']
 
+# Database to connect to
+DATABASE = {
+    'cluster_arn': os.environ['cluster_arn'],
+    'secret_arn': os.environ['secret_arn'],
+    'database': os.environ['database']
+    }
 
-# Handle HTTP GET requests
-# This becomes Lambda handler ->
+# Table to query for MVT data, and columns to
+# include in the tiles.
+TABLE = {
+    'table':       os.environ['table'],
+    'srid':        os.environ['srid'],
+    'geomColumn':  'geom',
+    'attrColumns': 'id'
+    } 
 
-mvt = TileRequestHandler()
+mvt = TileRequestHandler(DATABASE, TABLE)
 
-def handler(event, context, callback):
-
-    tile = self.pathToTile(self.path)
-    if not (tile and self.tileIsValid(tile)):
-        self.send_error(400, "invalid tile path: %s" % (self.path))
-        return
+# Respond to API GW requests
+def lambda_handler(event, context):
+    # http://localhost:8080/9/255/170.mvt
+    tile = mvt.pathToTile(event['pathParameters'])
+    
+    if not (tile and mvt.tileIsValid(tile)):
+        return {
+            'statusCode': 400,
+            'headers': {},
+            'body': json.dumps("invalid tile path: %s" % (self.path))
+        }
 
     env = mvt.tileToEnvelope(tile)
     sql = mvt.envelopeToSQL(env)
     pbf = mvt.sqlToPbf(sql)
 
-    print("path: %s\ntile: %s\n env: %s" % (self.path, tile, env))
+    print("path: %s\ntile: %s\n env: %s" % (event['pathParameters'], tile, env))
     print("sql: %s" % (sql))
     
-    ''' -> THIS BECOMES THE CALLBACK
-    self.send_response(200)
-    self.send_header("Access-Control-Allow-Origin", "*")
-    self.send_header("Content-type", "application/vnd.mapbox-vector-tile")
-    self.end_headers()
-    self.wfile.write(pbf)
-    '''
-
-"""
-# Not neded in Lambda
-with http.server.HTTPServer((HOST, PORT), TileRequestHandler) as server:
-    try:
-        print("serving at port", PORT)
-        server.serve_forever()
-    except KeyboardInterrupt:
-        if self.DATABASE_CONNECTION:
-            self.DATABASE_CONNECTION.close()
-        print('^C received, shutting down server')
-        server.socket.close()
-"""
-
+    return {
+        'statusCode': 200,
+        'isBase64Encoded': True,
+        'headers': {"Content-type": "application/vnd.mapbox-vector-tile",
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'OPTIONS,GET'
+        },
+        'body': base64.b64encode(pbf).decode("utf-8")
+    }
+    
